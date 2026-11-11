@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <OutputType>Library</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RootNamespace>MeowRoom</RootNamespace>
+    <AssemblyName>MeowRoom.Module</AssemblyName>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <NuGetAudit>false</NuGetAudit>
+    <!-- RoomAgent 在 RoomAgent/ 子目录里，单独有自己的 csproj，别被这个库当成源码编进去 -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Services\**\*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" />
+  </ItemGroup>
+
+  <!-- 配置入口和验签公钥不写进源码，构建时注入（宿主构建时传同名属性即可，会一路传到这里）：
+       dotnet build -p:MeowConfigEntry=https://<你的配置入口> -p:MeowConfigKeys=k1:<Ed25519公钥base64> -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>ConfigEntry</_Parameter1>
+      <_Parameter2>$(MeowConfigEntry)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>ConfigKeys</_Parameter1>
+      <_Parameter2>$(MeowConfigKeys)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,10 @@
+# 构建产物
+bin/
+obj/
+publish/
+*.user
+*.suo
+.vs/
+# 本地运行时
+easytier/
+*.log

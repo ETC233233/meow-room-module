@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <AssemblyName>RoomAgent</AssemblyName>
+    <RootNamespace>RoomAgent</RootNamespace>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.IO.Pipes.AccessControl" Version="5.0.0" />
+  </ItemGroup>
+
+  <!-- 隧道、端口扫描、地址映射等逻辑都在模块库里，代理只是一层提权外壳 -->
+  <ItemGroup>
+    <ProjectReference Include="..\MeowRoom.Module.csproj" />
+  </ItemGroup>
+
+</Project>
