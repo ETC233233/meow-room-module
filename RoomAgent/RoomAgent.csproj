@@ -12,7 +12,7 @@
     <AssemblyName>RoomAgent</AssemblyName>
     <RootNamespace>RoomAgent</RootNamespace>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
-    <NuGetAudit>false</NuGetAudit>
+    <NuGetAudit>true</NuGetAudit>
   </PropertyGroup>
 
   <ItemGroup>

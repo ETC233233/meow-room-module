@@ -11,7 +11,7 @@
     <RootNamespace>MeowRoom</RootNamespace>
     <AssemblyName>MeowRoom.Module</AssemblyName>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
-    <NuGetAudit>false</NuGetAudit>
+    <NuGetAudit>true</NuGetAudit>
     <!-- RoomAgent 在 RoomAgent/ 子目录里，单独有自己的 csproj，别被这个库当成源码编进去 -->
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
@@ -22,6 +22,11 @@
 
   <ItemGroup>
     <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" />
+  </ItemGroup>
+
+  <!-- 自测项目要调用 internal 的验签入口 -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="MeowRoom.SelfTest" />
   </ItemGroup>
 
   <!-- 配置入口和验签公钥不写进源码，构建时注入（宿主构建时传同名属性即可，会一路传到这里）：

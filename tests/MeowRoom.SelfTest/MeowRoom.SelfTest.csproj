@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 自测：不依赖 xunit 等测试框架，直接跑 exe，全部通过返回 0。
+       必须用 Debug 构建（RemoteConfig 的本地调试配置路径只在 Debug 里有，RoomApiClient 的测试要用它）。
+       构建：dotnet build tests\MeowRoom.SelfTest -c Debug -p:Platform=x64
+       运行：tests\MeowRoom.SelfTest\bin\x64\Debug\net8.0-windows\MeowRoom.SelfTest.exe
+       可选：命令行加 agent 参数和 RoomAgent.dll 路径，会额外测控制口 token 握手。 -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <NuGetAudit>true</NuGetAudit>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\MeowRoom.Module.csproj" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" />
+  </ItemGroup>
+
+</Project>

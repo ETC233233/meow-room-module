@@ -12,10 +12,12 @@ MeowLauncher 的联机模块源码（Windows）。**这是模块源码，不含�
 | `Services/RoomApiClient.cs` | 房间服务 HTTP 客户端：分接口超时、安全请求自动重试、401 通知 |
 | `Services/RoomSocket.cs` | 房间实时通道（WebSocket）：30 秒心跳、断线重连 |
 | `Services/AgentClient.cs` | 宿主这一侧：提权拉起 `RoomAgent`，带一次性 token 握手 |
-| `Services/EasyTierService.cs` | 起 / 停 EasyTier：参数校验、密钥打码、退出清理 |
+| `Services/EasyTierService.cs` | 起 / 停 EasyTier：组件哈希校验、参数校验、密钥打码、退出清理 |
+| `Services/AgentPaths.cs` | 提权代理的落盘位置（`%ProgramFiles%\MeowLauncher\`，不用用户可写目录） |
 | `Services/TunnelAddress.cs`、`LanHost.cs`、`McPortScanner.cs`、`GameInfo.cs`、`EdgeLocator.cs` | 地址映射、局域网识别、游戏端口扫描、实例信息、Cloudflare 边缘测速 |
 | `RoomAgent/` | 提权代理：单独的管理员进程，只在建隧道时需要 |
 | `tools/sign-config.mjs` | 给配置签名的小工具（私钥只从环境变量读） |
+| `tests/MeowRoom.SelfTest/` | 自测（34 项）：验签、组件哈希、地址校验、`RoomApiClient`、控制口握手 |
 | `MeowRoom.Module.csproj` | 模块库工程 |
 
 ## 里面没有什么
@@ -36,9 +38,11 @@ MeowLauncher 的联机模块源码（Windows）。**这是模块源码，不含�
    ```
    宿主引用本模块时，在宿主的构建命令里传同样的属性即可（会一路传到模块）。公钥可以放两把，逗号分隔，用于轮换。
 2. 入口返回信封 `{"payload":"<JSON 文本>","sig":"<base64>","kid":"k1"}`。客户端**先验 Ed25519 签名，再解析 payload**。
-   payload 字段：`version`(=1)、`issuedAt`、`expiresAt`(unix 秒，容忍 ±5 分钟)、`roomBase`(https)、`relay`(`tcp://host:port`)、`edgeIps`(可选)、`cfRoute`(可选)。
+   payload 字段：`version`(=1)、`issuedAt`、`expiresAt`(unix 秒，容忍 ±5 分钟)、`roomBase`(https)、`relay`(`tcp://host:port`)、`edgeIps`(可选)、`cfRoute`(可选)、
+   `easytier.files`（EasyTier 组件清单：`[{"name":"easytier-core.exe","sha256":"<64位十六进制>","required":true}, {"name":"wintun.dll",...}]`，必须包含 `easytier-core.exe`）。
 3. 验签失败、过期、版本未知、格式不对一律视为不可用：返回失败，**不会退回旧地址**。配置只放内存，不落盘、不写日志。
-4. `RoomAgent`（管理员权限）自己没有地址，只接受宿主验签后传来的值。
+4. `RoomAgent`（管理员权限）**自己拉取并验签配置**，不接受宿主传来的地址 / 中继 / 组件哈希。
+5. 取组件哈希：`Get-FileHash easytier-core.exe -Algorithm SHA256`（PowerShell）。
 
 签名：`tools/sign-config.mjs keygen` 生成密钥对，`sign` 对配置签名。私钥应只放在你自己的配置服务（例如 Worker secret）里，不要进仓库。
 
@@ -63,10 +67,9 @@ socket.State += room => { /* 刷新界面 */ };
 socket.Closed += () => { /* 房间已关闭 */ };
 _ = socket.RunAsync(roomCode, cts.Token);
 
-// 4. 起隧道（会弹一次 UAC；relay 和 roomBase 从 RemoteConfig.Current 里取）
-var cfg = RemoteConfig.Current!;
+// 4. 起隧道（会弹一次 UAC）。地址 / 中继 / 组件哈希不用传：提权代理自己拉取并验签配置
 var agent = new AgentClient();
-await agent.StartAsync(roomCode, secret, expose: true, api: cfg.RoomBase, token: myToken, rendezvous: cfg.Relay, port: gamePort);
+await agent.StartAsync(roomCode, secret, expose: true, token: myToken, port: gamePort);
 ```
 
 `RoomAgent.exe` 要放在宿主 exe 同级目录（或用环境变量 `MEOW_AGENT` 指定）。
@@ -79,13 +82,26 @@ dotnet build RoomAgent\RoomAgent.csproj -c Release -p:Platform=x64
 
 需要 .NET 8 SDK，仅限 Windows（x64）。
 
+EasyTier 要放在宿主 exe 同级的 `easytier\`（或 `easytier\easytier-windows-x86_64\`）下，文件必须和签名配置里的清单哈希一致；提权代理会把校验过的副本放进 `%ProgramFiles%\MeowLauncher\components\` 再执行，所以**第一次起隧道需要管理员权限写这个目录**。
+
+## 自测
+
+```powershell
+dotnet build tests\MeowRoom.SelfTest -c Debug -p:Platform=x64
+dotnet build RoomAgent\RoomAgent.csproj -c Debug -p:Platform=x64
+tests\MeowRoom.SelfTest\bin\x64\Debug\net8.0-windows\MeowRoom.SelfTest.exe `
+  --agent RoomAgent\bin\x64\Debug\net8.0-windows\win-x64\RoomAgent.dll
+```
+
+不带 `--agent` 会跳过控制口握手测试。必须用 Debug 构建。
+
 ## 已知限制
 
 下面这些**没有经过真实环境验证**，使用前请自行测：
 
 - **`RoomSocket` 没有对真实的 WebSocket 服务测过**：只做了编译。心跳超时重连、断线退避重连、被 401 拒绝后停止重连、收到 `closed` 结束，这几条路径都没有实测。
 - **提权起隧道的完整流程没有在真机上走通**：`AgentClient` → UAC → `RoomAgent` → EasyTier。`RoomAgent` 控制口的 token 握手单独测过（错误 token、不发 hello 都被直接断开，正确 token 收到就绪消息和 pong），但经 UAC 拉起的整条链路没有完整跑过。
-- **`EasyTierService` 没有真起过隧道**：参数校验、密钥打码、两次启动检测、Job Object 清理都只验证了能编译，没有对着真实的 `easytier-core` 运行测试。
+- **`EasyTierService` 没有真起过隧道**：组件哈希校验和复制（用假文件测过）、参数校验、拒绝无密钥这些有自测；但密钥打码、两次启动检测、Job Object 清理只验证了能编译，也没有拿真实的 `easytier-core` 和 wintun 走过「校验 → 复制到 Program Files → 执行」。
 - **`RoomApiClient` 只对本地假服务测过**（登录断线自动重试、建房断线不重试、401 只触发一次等），没有在真实服务上长时间跑过。
 - 服务端的登录目前是模拟校验，公开部署前需要接真实的微软校验（服务端，不在本仓库）。
 

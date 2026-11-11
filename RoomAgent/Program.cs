@@ -39,11 +39,16 @@ public static class Program
     private static StreamWriter? _out;
 
     private static Task? _portsTask;
-    private static readonly string LogPath = Path.Combine(Path.GetTempPath(), "roomagent.log");
-
+    // 日志放受保护的运行目录（%ProgramFiles%\MeowLauncher\run），不放 %TEMP%：
+    // 管理员进程往用户可写目录里追加文件，会被同用户程序用符号链接 / 联接点骗去写别的文件。
     private static void LogFile(string msg)
     {
-        try { File.AppendAllText(LogPath, DateTime.Now.ToString("HH:mm:ss") + " " + msg + Environment.NewLine); } catch { }
+        try
+        {
+            File.AppendAllText(Path.Combine(AgentPaths.RunDir, "roomagent.log"),
+                DateTime.Now.ToString("HH:mm:ss") + " " + msg + Environment.NewLine);
+        }
+        catch { }
     }
 
     public static async Task Main(string[] args)
@@ -150,20 +155,31 @@ public static class Program
             case "start":
                 _room = Str(root, "room");
                 _secret = Str(root, "secret");
-                _api = Str(root, "api");
                 _token = Str(root, "token");
-                var rendezvous = Str(root, "rendezvous");
-                if (rendezvous.Length > 0) _rendezvous = rendezvous;
-                if (_api.Length == 0 || _rendezvous.Length == 0)
+
+                // 服务地址 / 中继 / EasyTier 组件哈希：提权代理自己去拉取并验签，**不信宿主传来的值**。
+                // 就算宿主进程被攻破，也没法让管理员进程去连别的服务器、往 hosts 里写别的域名、执行别的程序。
+                RemoteConfigData? cfg = null;
+                try { if (RemoteConfig.EnsureAsync().GetAwaiter().GetResult()) cfg = RemoteConfig.Current; }
+                catch { }
+                if (cfg is null)
                 {
-                    Emit("log", "隧道：未收到已验证的服务配置，已拒绝启动");
+                    Emit("log", "隧道：提权代理自己没拿到已验签的服务配置，已拒绝启动（" + RemoteConfig.LastError + "）");
                     break;
                 }
+                _api = cfg.RoomBase;
+                _rendezvous = cfg.Relay;
                 _expose = root.TryGetProperty("expose", out var ex) && ex.ValueKind == JsonValueKind.True;
                 _fixedPort = root.TryGetProperty("port", out var pe) && pe.TryGetInt32(out var pv) ? pv : 0;
 
-                // 全局生效：把域名钉到测速选出的边缘 IP，本机其它程序（浏览器、验证码页）也跟着走
+                // 全局生效：把域名钉到测速选出的边缘 IP，本机其它程序（浏览器、验证码页）也跟着走。
+                // 写系统 hosts 前严格校验：配置明确要求走 Cloudflare 路由，且宿主给的 IP 必须落在 Cloudflare 官方网段内。
                 _edge = Str(root, "edge");
+                if (_edge.Length > 0 && !(cfg.CfRoute && EdgeLocator.IsCloudflareIp(_edge)))
+                {
+                    Emit("log", "隧道：边缘 IP 不在允许范围内，已忽略（不会写 hosts）");
+                    _edge = "";
+                }
                 HostsPin.Clear();
                 if (_edge.Length > 0 && Uri.TryCreate(_api, UriKind.Absolute, out var apiUri))
                     HostsPin.Pin(apiUri.Host, _edge);
@@ -174,8 +190,9 @@ public static class Program
                 _lastPort = 0;
                 _warnedNoLan = false;
 
-                Tunnel.Start(_room, _secret, _expose, _rendezvous, out var msg);
+                var started = Tunnel.Start(_room, _secret, _expose, _rendezvous, cfg.EasyTierFiles, out var msg);
                 Emit("log", "隧道：" + msg);
+                if (!started) { HostsPin.Clear(); break; }
                 // EasyTier 的输出已经由 EasyTierService 直接接管，不再 tail 日志文件
 
                 if (!_expose)

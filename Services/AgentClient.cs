@@ -139,11 +139,15 @@ public sealed class AgentClient : IDisposable
         return false;
     }
 
-    public async Task<bool> StartAsync(string room, string secret, bool expose, string api, string token,
-        string rendezvous, int port = 0, string edge = "")
+    /// <summary>
+    /// 让提权代理起隧道。注意：房间服务地址、中继、EasyTier 组件哈希<b>不由宿主传</b>，
+    /// 提权代理自己拉取并验签配置（见 RemoteConfig），宿主传了也没用——这样宿主被攻破也没法把管理员进程指到别处。
+    /// </summary>
+    public async Task<bool> StartAsync(string room, string secret, bool expose, string token,
+        int port = 0, string edge = "")
     {
         if (!await EnsureAsync()) return false;
-        return Send(new { cmd = "start", room, secret, expose, api, token, rendezvous, port, edge });
+        return Send(new { cmd = "start", room, secret, expose, token, port, edge });
     }
 
     public void Stop() => Send(new { cmd = "stop" });

@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
@@ -58,13 +59,81 @@ public sealed class EasyTierService : IDisposable
     /// <summary>当前活动网卡的局域网网段，例如 192.168.1.0/24。</summary>
     public static string? DetectLanCidr() => TunnelAddress.DetectLan()?.Cidr;
 
-    public bool Start(string roomCode, string secret, bool exposeLan, string rendezvous, out string message)
+    /// <param name="components">已验签配置里的 EasyTier 组件清单（文件名 + sha256）。没有清单就拒绝启动。</param>
+    public bool Start(string roomCode, string secret, bool exposeLan, string rendezvous,
+        IReadOnlyList<ComponentFile> components, out string message)
     {
         // 并发保护：重复点击或多个事件同时进来，只允许一个在起 / 停隧道
-        lock (_gate) return StartLocked(roomCode, secret, exposeLan, rendezvous, out message);
+        lock (_gate) return StartLocked(roomCode, secret, exposeLan, rendezvous, components, out message);
     }
 
-    private bool StartLocked(string roomCode, string secret, bool exposeLan, string rendezvous, out string message)
+    /// <summary>
+    /// 提权进程只执行「哈希和签名配置一致」的组件：
+    /// 先在来源目录里逐个校验 sha256，再复制到 %ProgramFiles%（普通用户不可写）下，复制后再校验一遍，最后从那里执行。
+    /// 这样即使来源目录是用户可写的（或被环境变量 MEOW_EASYTIER 指走），换一个文件也跑不起来，
+    /// 也不存在「校验完被换掉」的时间窗口（执行的是受保护目录里的副本）。
+    /// 成功返回受保护目录里的 easytier-core.exe 路径，失败返回 null 并给出原因。
+    /// </summary>
+    public static string? PrepareComponents(string sourceDir, IReadOnlyList<ComponentFile> files,
+        out string error, string? destRoot = null)
+    {
+        error = "";
+        if (files.Count == 0) { error = "配置里没有 EasyTier 组件清单"; return null; }
+        if (!files.Any(f => f.Name.Equals("easytier-core.exe", StringComparison.OrdinalIgnoreCase) && f.Required))
+        { error = "组件清单里缺少 easytier-core.exe"; return null; }
+        // 防御：即使调用方绕过了配置解析自己构造清单，文件名也必须是纯文件名（不能带路径 / 盘符 / ..）
+        if (files.Any(f => f.Name != Path.GetFileName(f.Name) || f.Name.Contains(':') || f.Sha256.Length != 64))
+        { error = "组件清单里有不合法的文件名或哈希"; return null; }
+
+        // 清单指纹：不同的清单（哪怕核心一样）落在不同目录，旧目录里的文件不会被误用
+        var fingerprint = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
+            string.Join("|", files.OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(f => f.Name.ToLowerInvariant() + ":" + f.Sha256))))).ToLowerInvariant()[..16];
+        var dest = Path.Combine(destRoot ?? AgentPaths.ComponentsDir, fingerprint);
+
+        try
+        {
+            Directory.CreateDirectory(dest);
+            foreach (var f in files)
+            {
+                var src = Path.Combine(sourceDir, f.Name);
+                var dst = Path.Combine(dest, f.Name);
+                if (File.Exists(dst) && Sha256Of(dst) == f.Sha256) continue;   // 受保护目录里已有一份校验过的
+
+                if (!File.Exists(src))
+                {
+                    if (f.Required) { error = $"缺少组件文件 {f.Name}"; return null; }
+                    continue;
+                }
+                if (Sha256Of(src) != f.Sha256) { error = $"组件 {f.Name} 的哈希和配置不一致，已拒绝"; return null; }
+
+                var tmp = dst + ".part";
+                File.Copy(src, tmp, true);
+                if (Sha256Of(tmp) != f.Sha256)
+                {
+                    File.Delete(tmp);
+                    error = $"组件 {f.Name} 复制后校验失败";
+                    return null;
+                }
+                File.Move(tmp, dst, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            error = "准备 EasyTier 组件失败：" + ex.Message;
+            return null;
+        }
+        return Path.Combine(dest, "easytier-core.exe");
+    }
+
+    private static string Sha256Of(string path)
+    {
+        using var fs = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant();
+    }
+
+    private bool StartLocked(string roomCode, string secret, bool exposeLan, string rendezvous,
+        IReadOnlyList<ComponentFile> components, out string message)
     {
         // 同房间同密钥同模式直接复用；换房间或换密钥必须重启，否则参数还是上一次的
         if (IsRunning && _room == roomCode && _secret == secret && _expose == exposeLan)
@@ -74,38 +143,32 @@ public sealed class EasyTierService : IDisposable
         }
         StopLocked();
 
-        var core = ResolveCorePath();
-        if (core == null) { message = "找不到 easytier-core.exe（可设 MEOW_EASYTIER 指向它）"; return false; }
-
         // 房间码 / 密钥 / 中继来自服务端或已验签配置，仍然严格校验，并用 ArgumentList 传参（不拼命令行字符串）
         if (!RoomShape.IsMatch(roomCode)) { message = "房间码格式不对"; return false; }
-        if (secret.Length > 0 && !SecretShape.IsMatch(secret)) { message = "网络密钥格式不对"; return false; }
+        // 6 位房间码不能当网络密钥（猜一万次就中），所以没有随机密钥就直接拒绝，不再退回房间码。
+        if (secret.Length == 0) { message = "服务端没有下发网络密钥，已拒绝建立隧道"; return false; }
+        if (!SecretShape.IsMatch(secret)) { message = "网络密钥格式不对"; return false; }
         if (!RelayShape.IsMatch(rendezvous)) { message = "中继地址格式不对"; return false; }
+
+        var source = ResolveCorePath();
+        if (source == null) { message = "找不到 easytier-core.exe（可设 MEOW_EASYTIER 指向它）"; return false; }
+
+        // 只执行哈希和签名配置一致的组件，并且从受保护目录里的副本执行
+        var core = PrepareComponents(Path.GetDirectoryName(source)!, components, out var prepErr);
+        if (core == null) { message = prepErr; return false; }
 
         KillStaleCore(core);
 
         var netName = "meow-" + roomCode;
-        // 房间码只有 6 位，不能当网络密钥（猜一万次就中）。密钥由服务端随机下发，
-        // 老服务端没有 secret 时才退回房间码，并在日志里明确警告。
         var netSecret = secret;
-        if (netSecret.Length == 0)
-        {
-            netSecret = roomCode;
-            Log?.Invoke("警告：服务端没下发随机密钥，正在用 6 位房间码当网络密钥");
-        }
 
+        // 不再使用 --file-log-dir：它会让管理员进程往 %TEMP% 这种用户可写目录里写日志；
+        // 输出已经由 PumpAsync 直接接管，不需要日志文件。
         var baseArgs = new List<string>
         {
             "--network-name", netName, "--network-secret", netSecret,
             "--dhcp", "--disable-upnp", "-p", rendezvous,
         };
-        try
-        {
-            LogDir = Path.Combine(Path.GetTempPath(), "meow-easytier");
-            Directory.CreateDirectory(LogDir);
-            baseArgs.AddRange(new[] { "--file-log-dir", LogDir, "--file-log-level", "info" });
-        }
-        catch { }
 
         if (exposeLan)
         {
@@ -203,15 +266,12 @@ public sealed class EasyTierService : IDisposable
     private static string Redact(string text, string secret) =>
         secret.Length == 0 ? text : text.Replace(secret, "***", StringComparison.Ordinal);
 
-    private static string PidFile => Path.Combine(Path.GetTempPath(), "meow-easytier", "core.pid");
+    // pid 文件放受保护的运行目录（%ProgramFiles%），不放 %TEMP%：管理员进程不往用户可写目录里写文件。
+    private static string PidFile => Path.Combine(AgentPaths.RunDir, "core.pid");
 
     private static void WritePid(int pid)
     {
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(PidFile)!);
-            File.WriteAllText(PidFile, pid.ToString());
-        }
+        try { File.WriteAllText(PidFile, pid.ToString()); }
         catch { }
     }
 

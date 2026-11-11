@@ -40,6 +40,21 @@ public static class EdgeLocator
         (0x83004800, 22), // 131.0.72.0/22
     };
 
+    /// <summary>是否落在 Cloudflare 官方 IPv4 段内。提权代理写 hosts 前用它校验宿主传来的边缘 IP。</summary>
+    public static bool IsCloudflareIp(string? ip)
+    {
+        if (!System.Net.IPAddress.TryParse(ip, out var addr)
+            || addr.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) return false;
+        var b = addr.GetAddressBytes();
+        var v = ((uint)b[0] << 24) | ((uint)b[1] << 16) | ((uint)b[2] << 8) | b[3];
+        foreach (var (network, prefix) in Ranges)
+        {
+            var mask = prefix == 0 ? 0u : uint.MaxValue << (32 - prefix);
+            if ((v & mask) == (network & mask)) return true;
+        }
+        return false;
+    }
+
     private static string CachePath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MeowRoom", "edges.json");
 
