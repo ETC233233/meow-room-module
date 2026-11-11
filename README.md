@@ -79,6 +79,16 @@ dotnet build RoomAgent\RoomAgent.csproj -c Release -p:Platform=x64
 
 需要 .NET 8 SDK，仅限 Windows（x64）。
 
+## 已知限制
+
+下面这些**没有经过真实环境验证**，使用前请自行测：
+
+- **`RoomSocket` 没有对真实的 WebSocket 服务测过**：只做了编译。心跳超时重连、断线退避重连、被 401 拒绝后停止重连、收到 `closed` 结束，这几条路径都没有实测。
+- **提权起隧道的完整流程没有在真机上走通**：`AgentClient` → UAC → `RoomAgent` → EasyTier。`RoomAgent` 控制口的 token 握手单独测过（错误 token、不发 hello 都被直接断开，正确 token 收到就绪消息和 pong），但经 UAC 拉起的整条链路没有完整跑过。
+- **`EasyTierService` 没有真起过隧道**：参数校验、密钥打码、两次启动检测、Job Object 清理都只验证了能编译，没有对着真实的 `easytier-core` 运行测试。
+- **`RoomApiClient` 只对本地假服务测过**（登录断线自动重试、建房断线不重试、401 只触发一次等），没有在真实服务上长时间跑过。
+- 服务端的登录目前是模拟校验，公开部署前需要接真实的微软校验（服务端，不在本仓库）。
+
 ## 行为约定
 
 - 建房 / 加入 / 关房 / 离开超时 45 秒且**不自动重试**（可能已在服务端生效，重试会重复建房）；GET、登录、中继准入超时后自动重试一次。

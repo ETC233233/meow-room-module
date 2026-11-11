@@ -11,4 +11,6 @@
 
 第 2、3 条属于服务端，本仓库不含服务端。
 
+另外，以下属于**未经验证**的部分（详见 README「已知限制」）：`RoomSocket` 没有对真实 WebSocket 服务测过；提权起隧道的完整流程（UAC → `RoomAgent` → EasyTier）没有在真机上完整走通。
+
 报告问题请开 issue，不要贴 token、房间密钥或服务器地址。
