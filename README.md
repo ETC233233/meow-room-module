@@ -125,3 +125,13 @@ tests\MeowRoom.SelfTest\bin\x64\Debug\net8.0-windows\MeowRoom.SelfTest.exe `
 ## 许可证
 
 MIT，见 `LICENSE`。第三方组件见 `THIRD-PARTY-NOTICES.md`。
+
+## 作为「按需下载的组件包」分发
+
+模块、`RoomAgent` 和 EasyTier 不必编进宿主应用，可以做成一个组件包，由宿主在用户首次使用联机时下载：
+
+- 包内放 `MeowRoom.Module.dll`、自包含的 `RoomAgent.exe`、`easytier\easytier-windows-x86_64\`（四个原版文件）、许可证，以及 `component.json`（版本、接口级别、每个文件的 sha256）。
+- 宿主在运行时从组件目录解析 `MeowRoom.Module`，并设置 `AgentPaths.ComponentRoot` 指向它（模块据此找 `RoomAgent.exe` 和 EasyTier）。
+- **接口级别**：模块的 `AssemblyMetadata("OnlineApiLevel")`。模块和宿主之间做了不兼容的改动就把它 +1；宿主只加载和自己同级别的包，所以旧宿主继续用旧级别的包、新宿主去取新级别的包。
+- **信任**：宿主应从签名的清单里取包的 sha256 和大小，哈希对不上就丢弃，这样下载镜像（含第三方加速代理）不必可信；解压后还要和 `component.json` 逐文件核对，路径越界、缺文件、多文件一律拒绝。
+- MeowLauncher 的实现参考：`Services/OnlineComponent.cs`、`ComponentManifest.cs`、`ComponentPackage.cs` 和打包脚本 `tools/pack_online_component.ps1`（在 MeowLauncher 仓库里）。

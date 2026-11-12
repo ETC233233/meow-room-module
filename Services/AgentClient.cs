@@ -198,6 +198,8 @@ public sealed class AgentClient : IDisposable
         if (!string.IsNullOrWhiteSpace(env) && File.Exists(env)) return env;
 
         var candidates = new List<string>();
+        if (!string.IsNullOrWhiteSpace(AgentPaths.ComponentRoot))
+            candidates.Add(Path.Combine(AgentPaths.ComponentRoot, "RoomAgent.exe"));
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         for (var i = 0; i < 8 && dir is not null; i++, dir = dir.Parent)
         {

@@ -47,6 +47,11 @@ public sealed class EasyTierService : IDisposable
         var env = Environment.GetEnvironmentVariable("MEOW_EASYTIER");
         if (!string.IsNullOrWhiteSpace(env) && File.Exists(env)) return env;
 
+        if (!string.IsNullOrWhiteSpace(AgentPaths.ComponentRoot))
+        {
+            var cp = Path.Combine(AgentPaths.ComponentRoot, "easytier", "easytier-windows-x86_64", "easytier-core.exe");
+            if (File.Exists(cp)) return cp;
+        }
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
         for (var i = 0; i < 8 && dir != null; i++, dir = dir.Parent)
         {

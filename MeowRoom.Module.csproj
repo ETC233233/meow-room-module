@@ -40,6 +40,11 @@
       <_Parameter1>ConfigKeys</_Parameter1>
       <_Parameter2>$(MeowConfigKeys)</_Parameter2>
     </AssemblyAttribute>
+    <!-- 模块和宿主之间的接口级别：宿主按它挑组件包，级别不同就不加载（模块大改、接口不兼容时 +1） -->
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>OnlineApiLevel</_Parameter1>
+      <_Parameter2>1</_Parameter2>
+    </AssemblyAttribute>
   </ItemGroup>
 
 </Project>

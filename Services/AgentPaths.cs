@@ -7,6 +7,13 @@ namespace MeowRoom.Services;
 /// </summary>
 public static class AgentPaths
 {
+    /// <summary>
+    /// 宿主把联机组件解压在哪个目录（里面有 RoomAgent.exe 和 easytier\easytier-windows-x86_64\）。
+    /// 设了就优先从这里找；没设就沿用「从程序所在目录往上找」的老办法。
+    /// 提权代理自己的 AppContext.BaseDirectory 就是组件目录，所以它不需要设置。
+    /// </summary>
+    public static string? ComponentRoot { get; set; }
+
     /// <summary>仅供自测使用：把根目录换成临时目录（自测不是管理员，写不了 Program Files）。</summary>
     public static string? Override { get; set; }
 
