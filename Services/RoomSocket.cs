@@ -32,6 +32,7 @@ public sealed class RoomSocket
     /// <summary>跑到房间关闭、登录过期或被取消为止。</summary>
     public async Task RunAsync(string roomCode, CancellationToken ct)
     {
+        if (!OnlineSwitch.Enabled) { Log?.Invoke(OnlineSwitch.DisabledMessage); return; }
         var wait = 1000;
         while (!ct.IsCancellationRequested)
         {

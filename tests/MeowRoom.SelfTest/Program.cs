@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -14,6 +15,21 @@ void T(string name, bool ok, string info = "")
 {
     Console.WriteLine((ok ? "PASS " : "FAIL ") + name + (info.Length > 0 ? " | " + info : ""));
     if (!ok) failed++;
+}
+
+// ───────────── 0. 联机总开关：默认关闭时，模块不产生任何网络请求、不拉起提权代理 ─────────────
+{
+    T("switch: default is off", !OnlineSwitch.Enabled);
+    T("switch: config fetch refused while off",
+        !await RemoteConfig.EnsureAsync() && RemoteConfig.LastError == OnlineSwitch.DisabledMessage, RemoteConfig.LastError);
+    using var api0 = new RoomApiClient(() => "");
+    var (s0, _) = await api0.CallAsync(HttpMethod.Get, "/api/health", quiet: true);
+    T("switch: api call makes no request while off", s0 == 0);
+    using var agent0 = new AgentClient();
+    T("switch: agent is not started (no UAC) while off", !await agent0.StartAsync("123456", new string('d', 32), false, "tok"));
+    await new RoomSocket(() => "").RunAsync("123456", CancellationToken.None);
+    T("switch: socket returns immediately while off", true);
+    OnlineSwitch.Enabled = true;   // 后面的测试需要联机功能开着
 }
 
 // ───────────── 1. 云下发配置：验签 / 过期 / 篡改 / 清单格式 ─────────────
@@ -50,6 +66,17 @@ void T(string name, bool ok, string info = "")
     T("config: garbage rejected", RemoteConfig.VerifyEnvelope("{not json", Keys, now) is null);
     T("config: http roomBase rejected in signed config", RemoteConfig.VerifyEnvelope(Sign(Payload(room: "http://rooms.example.test")), Keys, now) is null);
     T("config: malformed relay rejected", RemoteConfig.VerifyEnvelope(Sign(Payload(relay: "relay.example.test")), Keys, now) is null);
+
+    string WithAccount(string a) => Sign(JsonSerializer.Serialize(new
+    {
+        version = 1, issuedAt = now, expiresAt = now + 3600,
+        roomBase = "https://rooms.example.test", relay = "tcp://relay.example.test:11010", accountBase = a,
+    }));
+    var withAcct = RemoteConfig.VerifyEnvelope(WithAccount("https://acct.example.test/"), Keys, now);
+    T("config: accountBase parsed (trailing slash trimmed)", withAcct is not null && withAcct.AccountBase == "https://acct.example.test");
+    T("config: accountBase is optional (empty when absent)", cfg is not null && cfg.AccountBase == "");
+    T("config: http accountBase rejected in signed config", RemoteConfig.VerifyEnvelope(WithAccount("http://acct.example.test"), Keys, now) is null);
+    T("config: garbage accountBase rejected", RemoteConfig.VerifyEnvelope(WithAccount("not a url"), Keys, now) is null);
     T("config: path in component name rejected",
         RemoteConfig.VerifyEnvelope(Sign(Payload(easytier: new { files = new[] { new { name = "..\\evil.exe", sha256 = sha, required = true } } })), Keys, now) is null);
     T("config: bad component hash rejected",
@@ -116,8 +143,9 @@ T("edge: non-cloudflare / loopback / garbage rejected",
     var port = 18931;
     var counts = new Dictionary<string, int>();
     var cfgPath = Path.Combine(Path.GetTempPath(), "meowroom-selftest-cfg.json");
+    const int acctPort = 18932;
     File.WriteAllText(cfgPath, "{\"version\":1,\"issuedAt\":0,\"expiresAt\":9999999999,\"roomBase\":\"http://127.0.0.1:" + port
-        + "\",\"relay\":\"tcp://127.0.0.1:11010\"}");
+        + "\",\"relay\":\"tcp://127.0.0.1:11010\",\"accountBase\":\"http://127.0.0.1:" + acctPort + "\"}");
     Environment.SetEnvironmentVariable("MEOW_DEV_CONFIG", cfgPath);
 
     var l = new HttpListener();
@@ -161,6 +189,151 @@ T("edge: non-cloudflare / loopback / garbage rejected",
     T("api: 401 without a login token does not raise", expired == 0);
     T("api: per-endpoint timeouts", RoomApiClient.TimeoutFor("/api/room/create").TotalSeconds == 45
         && RoomApiClient.TimeoutFor("/api/health").TotalSeconds == 10 && RoomApiClient.TimeoutFor("/api/login").TotalSeconds == 20);
+
+    // ---- 账号服务客户端：进程内假账号服务（含 WebSocket）----
+    const string GoodTok = "tok-good";
+    const string SrvId = "00112233445566778899aabbccddeeff";
+    string? lastVerifyBody = null;
+    string? lastReplyBody = null;
+    var revoked = false;
+    var verifyCalls = 0;
+    var acct = new HttpListener();
+    acct.Prefixes.Add($"http://127.0.0.1:{acctPort}/");
+    acct.Start();
+    _ = Task.Run(async () =>
+    {
+        while (true)
+        {
+            HttpListenerContext c;
+            try { c = await acct.GetContextAsync(); } catch { return; }
+            _ = Task.Run(async () =>
+            {
+                var path = c.Request.Url!.AbsolutePath;
+                var auth = c.Request.Headers["Authorization"] ?? "";
+                async Task Reply(int code, string body)
+                {
+                    c.Response.StatusCode = code;
+                    c.Response.ContentType = "application/json";
+                    var b = Encoding.UTF8.GetBytes(body);
+                    await c.Response.OutputStream.WriteAsync(b);
+                    c.Response.Close();
+                }
+                if (path == "/auth/challenge") { await Reply(200, "{\"ok\":true,\"serverId\":\"" + SrvId + "\"}"); return; }
+                if (path == "/auth/verify")
+                {
+                    Interlocked.Increment(ref verifyCalls);
+                    using var rd = new StreamReader(c.Request.InputStream);
+                    lastVerifyBody = await rd.ReadToEndAsync();
+                    var vb = JsonDocument.Parse(lastVerifyBody).RootElement;
+                    if (vb.TryGetProperty("serverId", out var vsid) && vsid.GetString() == SrvId
+                        && vb.TryGetProperty("signature", out var vsig) && vsig.GetString() == "sig-ok")
+                        await Reply(200, "{\"ok\":true,\"token\":\"" + GoodTok + "\",\"uuid\":\"" + new string('a', 32) + "\",\"name\":\"Alice_A\",\"exp\":9999999999999,\"developer\":true}");
+                    else
+                        await Reply(401, "{\"ok\":false,\"error\":\"bad-proof\"}");
+                    return;
+                }
+                if (path == "/invite")
+                {
+                    if (auth != "Bearer " + GoodTok || revoked) await Reply(401, "{\"ok\":false,\"error\":\"unauthorized\"}");
+                    else await Reply(200, "{\"ok\":true,\"delivered\":true}");
+                    return;
+                }
+                if (path == "/invite/reply")
+                {
+                    using var rr = new StreamReader(c.Request.InputStream);
+                    lastReplyBody = await rr.ReadToEndAsync();
+                    if (auth != "Bearer " + GoodTok || revoked) await Reply(401, "{\"ok\":false,\"error\":\"unauthorized\"}");
+                    else if (lastReplyBody.Contains("\"nobody\"")) await Reply(404, "{\"ok\":false,\"error\":\"no-pending\"}");
+                    else await Reply(200, "{\"ok\":true,\"delivered\":true}");
+                    return;
+                }
+                if (path == "/ws" && c.Request.IsWebSocketRequest)
+                {
+                    if (auth != "Bearer " + GoodTok || revoked) { c.Response.StatusCode = 401; c.Response.Close(); return; }
+                    var wsCtx = await c.AcceptWebSocketAsync(null);
+                    var ws = wsCtx.WebSocket;
+                    await ws.SendAsync(Encoding.UTF8.GetBytes("{\"type\":\"hello\"}"), WebSocketMessageType.Text, true, CancellationToken.None);
+                    await ws.SendAsync(Encoding.UTF8.GetBytes("{\"type\":\"invite\",\"from\":{\"uuid\":\"" + new string('b', 32) + "\",\"name\":\"Bob_B\"},\"roomCode\":\"123456\",\"ts\":42}"),
+                        WebSocketMessageType.Text, true, CancellationToken.None);
+                    await ws.SendAsync(Encoding.UTF8.GetBytes("{\"type\":\"invite_reply\",\"from\":{\"uuid\":\"" + new string('b', 32) + "\",\"name\":\"Bob_B\"},\"accepted\":true,\"ts\":43}"),
+                        WebSocketMessageType.Text, true, CancellationToken.None);
+                    var buf = new byte[1024];
+                    try
+                    {
+                        while (ws.State == WebSocketState.Open)
+                        {
+                            var r = await ws.ReceiveAsync(buf, CancellationToken.None);
+                            if (r.MessageType == WebSocketMessageType.Close) break;
+                            if (Encoding.UTF8.GetString(buf, 0, r.Count) == "ping")
+                                await ws.SendAsync(Encoding.UTF8.GetBytes("{\"type\":\"pong\"}"), WebSocketMessageType.Text, true, CancellationToken.None);
+                        }
+                    }
+                    catch { }
+                    return;
+                }
+                await Reply(404, "{}");
+            });
+        }
+    });
+
+    using var svc = new AccountService();
+    var (earlyOk, _, earlyMsg) = await svc.InviteAsync(new string('b', 32));
+    T("account: invite before login is refused", !earlyOk && earlyMsg.Contains("登录"), earlyMsg);
+
+    var proveCalls = 0;
+    var (noProofOk, noProofMsg) = await svc.LoginAsync("Alice_A", (_, _) => { proveCalls++; return Task.FromResult<LoginProof?>(null); });
+    T("account: no proof from the host -> login refused, verify never called", !noProofOk && proveCalls == 1 && verifyCalls == 0, noProofMsg);
+
+    var (badOk, badMsg) = await svc.LoginAsync("Alice_A", (_, _) => Task.FromResult<LoginProof?>(new LoginProof(new string('a', 32), "AAAA", 1, "BBBB", "sig-bad")));
+    T("account: server rejecting the proof -> login refused with the server's reason", !badOk && badMsg.Contains("bad-proof"), badMsg);
+
+    string? seenServerId = null;
+    var (loginOk, loginMsg) = await svc.LoginAsync("Alice_A", (sid, _) =>
+    {
+        seenServerId = sid;
+        return Task.FromResult<LoginProof?>(new LoginProof(new string('a', 32), "PUBKEY", 1234567890123, "CERTSIG", "sig-ok"));
+    });
+    T("account: login hands the server's challenge to the host's prover", seenServerId == SrvId, seenServerId ?? "null");
+    var sent = JsonDocument.Parse(lastVerifyBody ?? "{}").RootElement;
+    T("account: verify request carries uuid / publicKey / expiresAtMs / certSignature / signature and no token",
+        sent.TryGetProperty("uuid", out var su) && su.GetString() == new string('a', 32)
+        && sent.GetProperty("publicKey").GetString() == "PUBKEY" && sent.GetProperty("expiresAtMs").GetInt64() == 1234567890123
+        && sent.GetProperty("certSignature").GetString() == "CERTSIG" && sent.GetProperty("signature").GetString() == "sig-ok"
+        && !(lastVerifyBody ?? "").Contains("ccessToken", StringComparison.OrdinalIgnoreCase));
+    T("account: login succeeds, session carries authoritative uuid/name/developer",
+        loginOk && svc.Session is { } ss && ss.Uuid == new string('a', 32) && ss.Name == "Alice_A" && ss.Developer && svc.IsLoggedIn, loginMsg);
+
+    var (invOk, invDelivered, _) = await svc.InviteAsync(new string('b', 32), "123456");
+    T("account: invite with session -> delivered", invOk && invDelivered);
+
+    InviteEvent? gotInvite = null;
+    InviteReplyEvent? gotReply = null;
+    svc.Invite += e => gotInvite = e;
+    svc.InviteReply += e => gotReply = e;
+    using var pushCts = new CancellationTokenSource();
+    var pushTask = svc.RunPushAsync(pushCts.Token);
+    for (var i = 0; i < 40 && gotInvite is null; i++) await Task.Delay(100);
+    T("account: push channel delivers an invite event", gotInvite is { } g && g.FromName == "Bob_B" && g.RoomCode == "123456" && g.FromUuid == new string('b', 32) && g.Timestamp == 42,
+        gotInvite is null ? "nothing received" : $"{gotInvite.FromName}/{gotInvite.RoomCode}");
+    for (var i = 0; i < 40 && gotReply is null; i++) await Task.Delay(100);
+    T("account: push channel delivers an invite reply event", gotReply is { } gr && gr.FromName == "Bob_B" && gr.Accepted && gr.FromUuid == new string('b', 32) && gr.Timestamp == 43,
+        gotReply is null ? "nothing received" : $"{gotReply.FromName}/{gotReply.Accepted}");
+    pushCts.Cancel();
+    try { await pushTask; } catch (OperationCanceledException) { }
+
+    var (repOk, repDelivered, _) = await svc.ReplyInviteAsync(new string('b', 32), true);
+    T("account: reply sends toUuid + accepted and reports delivered", repOk && repDelivered && (lastReplyBody ?? "").Contains("\"accepted\":true") && (lastReplyBody ?? "").Contains(new string('b', 32)), lastReplyBody ?? "null");
+    var (rej, _, rejMsg) = await svc.ReplyInviteAsync("nobody", false);
+    T("account: server refusing the reply surfaces its reason", !rej && rejMsg.Contains("no-pending"), rejMsg);
+
+    // 服务端撤销会话：再连推送通道会被 401 拒绝 -> 触发 SessionExpired，并清掉本地会话
+    revoked = true;
+    var acctExpired = 0;
+    svc.SessionExpired += () => Interlocked.Increment(ref acctExpired);
+    using var pushCts2 = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+    await svc.RunPushAsync(pushCts2.Token);
+    T("account: 401 on the push channel -> SessionExpired once, session cleared", acctExpired == 1 && !svc.IsLoggedIn, $"expired={acctExpired} loggedIn={svc.IsLoggedIn}");
+    acct.Stop();
     l.Stop();
     Environment.SetEnvironmentVariable("MEOW_DEV_CONFIG", null);
 }

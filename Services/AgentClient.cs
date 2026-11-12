@@ -95,6 +95,8 @@ public sealed class AgentClient : IDisposable
     /// </summary>
     public async Task<bool> EnsureAsync(int waitMs = 120000)
     {
+        // 联机总开关没开：不连也不拉起提权代理（不会弹 UAC）
+        if (!OnlineSwitch.Enabled) { Log?.Invoke(OnlineSwitch.DisabledMessage); return false; }
         if (IsConnected) return true;
 
         // 模块可能还活着（刚关房、还没退），先连一下，能复用就不要再弹 UAC

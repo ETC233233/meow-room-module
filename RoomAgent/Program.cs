@@ -58,6 +58,10 @@ public static class Program
             if (args[i] == "--parent" && int.TryParse(args[i + 1], out var pp)) parentPid = pp;
         if (parentPid > 0) WatchParent(parentPid);
 
+        // 提权代理只会被已启用联机功能的宿主拉起（并带着一次性 token），所以这里把总开关打开。
+        // 没有 token 的话下面会直接退出，不会因为这行就变成可被别人驱动的状态。
+        OnlineSwitch.Enabled = true;
+
         // 控制口鉴权：启动器通过提权命令行传来一次性 token；没有 token 就不开口。
         var authToken = "";
         for (var i = 0; i < args.Length - 1; i++)

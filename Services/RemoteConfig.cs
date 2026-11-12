@@ -19,6 +19,10 @@ public sealed class RemoteConfigData
 {
     public string RoomBase { get; init; } = "";
     public string Relay { get; init; } = "";
+
+    /// <summary>账号服务地址（Minecraft 登录握手 + 邀请推送）。可选：配置里没有就是空串，账号相关功能不可用。</summary>
+    public string AccountBase { get; init; } = "";
+
     public string[] EdgeIps { get; init; } = Array.Empty<string>();
     public bool CfRoute { get; init; }
     public long ExpiresAt { get; init; }
@@ -34,7 +38,7 @@ public static class RemoteConfig
 {
     private const int SupportedVersion = 1;
     private const long SkewSeconds = 300;
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(5) };
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
     private static readonly SemaphoreSlim Gate = new(1, 1);
     private static readonly Regex RelayShape = new(@"^tcp://[A-Za-z0-9.\-]+:\d{2,5}$", RegexOptions.Compiled);
 
@@ -51,6 +55,8 @@ public static class RemoteConfig
     /// <summary>有有效配置就直接返回 true；没有或快过期就重新拉一次。</summary>
     public static async Task<bool> EnsureAsync(CancellationToken ct = default)
     {
+        // 联机总开关没开：不拉配置、不产生任何网络请求
+        if (!OnlineSwitch.Enabled) return Fail(OnlineSwitch.DisabledMessage);
         var cur = Current;
         if (cur is not null && cur.ExpiresAt - DateTimeOffset.UtcNow.ToUnixTimeSeconds() > 60) return true;
         await Gate.WaitAsync(ct);
@@ -92,9 +98,10 @@ public static class RemoteConfig
             return true;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception)
+        catch (Exception ex)
         {
-            return Fail("联机服务暂时不可用");
+            // 带上异常类型（不含地址），方便区分超时、DNS、连接被拒
+            return Fail("联机服务暂时不可用（" + (ex is TaskCanceledException ? "连接超时" : ex.GetType().Name) + "）");
         }
     }
 
@@ -166,6 +173,16 @@ public static class RemoteConfig
             var relay = (r.GetProperty("relay").GetString() ?? "").Trim();
             if (!RelayShape.IsMatch(relay)) return null;
 
+            // 账号服务地址：可选；写了就必须是合法的 https 地址（调试版允许 http），写错整份配置视为无效
+            var accountBase = "";
+            if (r.TryGetProperty("accountBase", out var ab) && ab.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(ab.GetString()))
+            {
+                accountBase = ab.GetString()!.Trim().TrimEnd('/');
+                if (!Uri.TryCreate(accountBase, UriKind.Absolute, out var au)) return null;
+                if (au.Scheme != Uri.UriSchemeHttps && !(allowHttp && au.Scheme == Uri.UriSchemeHttp)) return null;
+            }
+
             var edges = new List<string>();
             if (r.TryGetProperty("edgeIps", out var arr) && arr.ValueKind == JsonValueKind.Array)
                 foreach (var e in arr.EnumerateArray())
@@ -193,7 +210,8 @@ public static class RemoteConfig
 
             return new RemoteConfigData
             {
-                RoomBase = roomBase, Relay = relay, EdgeIps = edges.ToArray(), CfRoute = cf, ExpiresAt = expires,
+                RoomBase = roomBase, Relay = relay, AccountBase = accountBase,
+                EdgeIps = edges.ToArray(), CfRoute = cf, ExpiresAt = expires,
                 EasyTierFiles = files.ToArray(),
             };
         }
